@@ -1,0 +1,35 @@
+services:
+  user-database:
+    image: mysql:8.0
+    container_name: user-database
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: user-database
+    volumes:
+      - user-database:/var/lib/mysql
+  product-database:
+    image: mysql:8.0
+    container_name: product-database
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: product-database
+    volumes:
+      - product-database:/var/lib/mysql
+  sales-database:
+    image: mongodb:latest
+    container_name: sales-database
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
+    volumes:
+      - sales-database:/data/db
+volumes:
+  user-database:
+  product-database:
+  sales-database:
