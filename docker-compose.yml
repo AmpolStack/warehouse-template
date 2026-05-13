@@ -6,9 +6,14 @@ services:
       - "3306:3306"
     environment:
       MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: user-database
+      MYSQL_DATABASE: user_database
     volumes:
-      - user-database:/var/lib/mysql
+      - user_database:/var/lib/mysql
+      - ./deploy/sources/mysql-user/user-init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: [ "mysqld", "--server-id=1", "--log-bin=mysql-bin", "--binlog-format=ROW", "--binlog-row-image=FULL" ]
+    networks:
+      - app-net
+
   product-database:
     image: mysql:8.0
     container_name: product-database
@@ -16,20 +21,210 @@ services:
       - "3307:3306"
     environment:
       MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: product-database
+      MYSQL_DATABASE: product_database
     volumes:
-      - product-database:/var/lib/mysql
+      - product_database:/var/lib/mysql
+      - ./deploy/sources/mysql-product/products-init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: [ "mysqld", "--server-id=2", "--log-bin=mysql-bin", "--binlog-format=ROW", "--binlog-row-image=FULL" ]
+    networks:
+      - app-net
+
   sales-database:
-    image: mongodb:latest
+    image: mongo:latest
     container_name: sales-database
     ports:
       - "27017:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: root
+    entrypoint:
+      - bash
+      - -c
+      - |
+        cp /tmp/mongodb.key /etc/mongodb.key
+        chmod 400 /etc/mongodb.key
+        chown 999:999 /etc/mongodb.key
+        exec /usr/local/bin/docker-entrypoint.sh mongod --replSet rs0 --bind_ip_all --keyFile /etc/mongodb.key
     volumes:
-      - sales-database:/data/db
+      - sales_database:/data/db
+      - ./deploy/sources/mongodb-sales/mongodb.key:/tmp/mongodb.key:ro
+    networks:
+      - app-net
+    healthcheck:
+      test: [ "CMD", "mongosh", "-u", "root", "-p", "root", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping').ok" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  mongo-init:
+    image: mongo:latest
+    container_name: mongo-init
+    restart: "no"
+    depends_on:
+      sales-database:
+        condition: service_healthy
+    volumes:
+      - ./deploy/sources/mongodb-sales/rs-init.js:/rs-init.js:ro
+    networks:
+      - app-net
+    command: >
+      mongosh
+        --host sales-database:27017
+        -u root -p root
+        --authenticationDatabase admin
+        /rs-init.js
+
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: kafka-4-kraft
+    hostname: kafka
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_NODE_ID: "1"
+      CLUSTER_ID: "Owf9McwuS86HYMkgixXA-Q"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: [ "CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - app-net
+
+  debezium:
+    build:
+      context: ./deploy/backbone/debezium/setup
+      dockerfile: Dockerfile
+    container_name: debezium-connect
+    restart: always
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: debezium-connect-cluster
+      CONFIG_STORAGE_TOPIC: dw.debezium.connect.configs
+      OFFSET_STORAGE_TOPIC: dw.debezium.connect.offsets
+      STATUS_STORAGE_TOPIC: dw.debezium.connect.statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "true"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_REST_ADVERTISED_HOST_NAME: debezium
+      CONNECT_PLUGIN_PATH: /kafka/connect
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -sf http://localhost:8083/connectors || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+    networks:
+      - app-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+      user-database:
+        condition: service_started
+      product-database:
+        condition: service_started
+      mongo-init:
+        condition: service_completed_successfully
+      rustfs-init:
+        condition: service_completed_successfully
+      sales-database:
+        condition: service_healthy
+
+  debezium-init:
+    image: curlimages/curl:latest
+    container_name: debezium-init
+    restart: "no"
+    depends_on:
+      debezium:
+        condition: service_healthy
+    volumes:
+      - ./deploy/backbone/debezium/setup/register-connectors.sh:/register-connectors.sh:ro
+      - ./deploy/backbone/debezium/connectors/user-database-config.json:/connectors/user-database-config.json:ro
+      - ./deploy/backbone/debezium/connectors/product-database-config.json:/connectors/product-database-config.json:ro
+      - ./deploy/backbone/debezium/connectors/sales-database.json:/connectors/sales-database.json:ro
+      - ./deploy/backbone/debezium/connectors/s3-sink-config.json:/connectors/s3-sink-config.json:ro
+    networks:
+      - app-net
+    entrypoint: [ "sh", "/register-connectors.sh" ]
+
+  kafbat-ui:
+    container_name: kafbat-ui
+    image: ghcr.io/kafbat/kafka-ui:latest
+    ports:
+      - "8080:8080"
+    environment:
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    volumes:
+      - ./deploy/backbone/kafbat-ui/dynamic_config.yml:/etc/kafkaui/dynamic_config.yaml
+    networks:
+      - app-net
+    depends_on:
+      debezium-init:
+        condition: service_completed_successfully
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: sarustfs
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # Consola web
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_CONSOLE_ENABLE: "true"
+    volumes:
+      - rustfs_data:/data
+    networks:
+      - app-net
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:9000/health || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rustfs-init:
+    image: minio/mc:latest
+    container_name: rustfs-init
+    restart: "no"
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    networks:
+      - app-net
+    entrypoint: >
+      sh -c "
+        mc alias set local http://sarustfs:9000 rustfsadmin rustfsadmin &&
+        mc mb --ignore-existing local/data-lake &&
+        echo 'Bucket data-lake listo.'
+      "
+
 volumes:
-  user-database:
-  product-database:
-  sales-database:
+  user_database:
+  product_database:
+  sales_database:
+  kafka_data:
+  rustfs_data:
+
+networks:
+  app-net:
+    driver: bridge
