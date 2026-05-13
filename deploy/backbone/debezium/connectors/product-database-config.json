@@ -1,0 +1,16 @@
+{
+    "name": "product-database-connector",
+    "config": {
+        "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+        "database.hostname": "product-database",
+        "database.port": "3306",
+        "database.user": "root",
+        "database.password": "root",
+        "database.server.id": "2",
+        "topic.prefix": "product-db",
+        "database.include.list": "product_database",
+        "table.include.list": "product_database.product,product_database.category",
+        "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+        "schema.history.internal.kafka.topic": "schema-history.product_database"
+    }
+}

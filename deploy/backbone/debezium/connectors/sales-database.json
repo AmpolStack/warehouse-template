@@ -1,0 +1,12 @@
+{
+    "name": "sales-database-connector",
+    "config": {
+        "connector.class": "io.debezium.connector.mongodb.MongoDbConnector",
+        "mongodb.connection.string": "mongodb://debezium_user:debezium_pass@sales-database:27017/?authSource=admin&replicaSet=rs0",
+        "topic.prefix": "sales-db",
+        "database.include.list": "sales_database",
+        "collection.include.list": "sales_database.orders,sales_database.orderLines",
+        "snapshot.mode": "initial",
+        "capture.mode": "change_streams"
+    }
+}

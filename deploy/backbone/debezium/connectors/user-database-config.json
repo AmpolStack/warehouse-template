@@ -1,0 +1,16 @@
+{
+    "name": "user-database-connector",
+    "config": {
+        "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+        "database.hostname": "user-database",
+        "database.port": "3306",
+        "database.user": "root",
+        "database.password": "root",
+        "database.server.id": "1",
+        "topic.prefix": "user-db",
+        "database.include.list": "user_database",
+        "table.include.list": "user_database.customer,user_database.employee,user_database.branch,user_database.payment_method",
+        "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+        "schema.history.internal.kafka.topic": "schema-history.user_database"
+    }
+}
